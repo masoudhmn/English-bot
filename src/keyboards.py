@@ -24,13 +24,15 @@ def get_answer_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_difficulty_keyboard():
+def get_difficulty_keyboard(word_id: int, is_correct: bool):
     """Keyboard for rating word difficulty"""
+    # Encode word_id and is_correct in callback data
+    correct_flag = "1" if is_correct else "0"
     keyboard = [
         [
-            InlineKeyboardButton("😊 Easy", callback_data="difficulty_easy"),
-            InlineKeyboardButton("😐 Normal", callback_data="difficulty_normal"),
-            InlineKeyboardButton("😓 Hard", callback_data="difficulty_hard")
+            InlineKeyboardButton("😊 Easy", callback_data=f"difficulty_easy_{word_id}_{correct_flag}"),
+            InlineKeyboardButton("😐 Normal", callback_data=f"difficulty_normal_{word_id}_{correct_flag}"),
+            InlineKeyboardButton("😓 Hard", callback_data=f"difficulty_hard_{word_id}_{correct_flag}")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)

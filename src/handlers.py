@@ -280,11 +280,11 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.message.edit_text(
             message,
-            reply_markup=get_difficulty_keyboard(),
+            reply_markup=get_difficulty_keyboard(word_id, is_correct),
             parse_mode="Markdown"
         )
     
-    # Store the answer
+    # Store the answer (keeping for backward compatibility)
     context.user_data["last_answer_correct"] = is_correct
 
 
@@ -294,16 +294,36 @@ async def handle_difficulty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = update.effective_user.id
-    word_id = context.user_data.get(SESSION_CURRENT_WORD)
-    is_correct = context.user_data.get("last_answer_correct", False)
     
-    # Extract difficulty from callback data
-    difficulty_map = {
-        "difficulty_easy": "easy",
-        "difficulty_normal": "normal",
-        "difficulty_hard": "hard"
-    }
-    difficulty = difficulty_map.get(query.data)
+    # Parse callback data: format is "difficulty_{level}_{word_id}_{is_correct}"
+    try:
+        parts = query.data.split("_")
+        if len(parts) >= 4:
+            # New format with word_id and is_correct in callback data
+            difficulty_level = parts[1]  # easy, normal, or hard
+            word_id = int(parts[2])
+            is_correct = parts[3] == "1"
+        else:
+            # Fallback to old format (for backward compatibility)
+            difficulty_level = parts[1] if len(parts) > 1 else "normal"
+            word_id = context.user_data.get(SESSION_CURRENT_WORD)
+            is_correct = context.user_data.get("last_answer_correct", False)
+            
+            # Validate that word_id exists
+            if not word_id:
+                await query.message.edit_text(
+                    "❌ Error: Session data lost. Please start a new learning session.",
+                    reply_markup=get_main_menu_keyboard()
+                )
+                return
+        
+        difficulty = difficulty_level
+    except (ValueError, IndexError) as e:
+        await query.message.edit_text(
+            "❌ Error: Invalid data. Please start a new learning session.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
     
     async with get_db_session() as session:
         # Update word progress
@@ -390,7 +410,13 @@ async def end_learning_session(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # Use appropriate method based on update type
     if update.callback_query:
-        await update.callback_query.message.edit_text(summary, reply_markup=get_main_menu_keyboard())
+        # Edit the message to show summary (without reply keyboard)
+        await update.callback_query.message.edit_text(summary)
+        # Send a new message with the main menu keyboard
+        await update.callback_query.message.reply_text(
+            "What would you like to do next?",
+            reply_markup=get_main_menu_keyboard()
+        )
     else:
         await update.message.reply_text(summary, reply_markup=get_main_menu_keyboard())
 

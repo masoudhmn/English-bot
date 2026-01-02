@@ -108,7 +108,10 @@ async def update_word_progress(
             user_id=user_id,
             word_id=word_id,
             leitner_box=1,
-            next_review_date=date.today() + timedelta(days=1)
+            next_review_date=date.today() + timedelta(days=1),
+            times_reviewed=0,
+            times_correct=0,
+            times_incorrect=0
         )
         session.add(progress)
     
