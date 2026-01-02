@@ -45,7 +45,7 @@ A comprehensive Telegram bot for learning English vocabulary using the **Leitner
 ### 1. Clone the Repository
 
 ```bash
-cd "c:\Users\Masoud\Desktop\my long term project\05-English_bot"
+git clone https://github.com/masoudhmn/English-bot.git
 ```
 
 ### 2. Install Dependencies
