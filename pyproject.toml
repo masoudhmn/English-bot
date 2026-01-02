@@ -1,0 +1,15 @@
+[project]
+name = "05-english-bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.13.0",
+    "asyncpg>=0.29.0",
+    "openpyxl>=3.1.2",
+    "psycopg2-binary>=2.9.9",
+    "python-dotenv>=1.0.0",
+    "python-telegram-bot[job-queue]>=22.5",
+    "sqlalchemy>=2.0.0",
+]
