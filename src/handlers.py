@@ -3,14 +3,15 @@
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 from sqlalchemy import select, and_
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.database import get_db_session
-from src.models import User, Word, StudySession, UserWordProgress, WordEditHistory
+from src.database import get_session
+from src.models import User, Word, StudySession, UserWordProgress, WordEditHistory, DifficultyLevel
 from src.leitner import get_words_for_review, get_new_words, update_word_progress, get_user_statistics
 from src.excel_handler import process_excel_file, validate_excel_structure, create_sample_excel
 from src.keyboards import (
@@ -22,6 +23,9 @@ from src.keyboards import (
     get_settings_keyboard,
     get_start_learning_keyboard,
 )
+from src.logger import setup_logger
+
+logger = setup_logger(__name__)
 
 # Conversation states
 WAITING_WORD_LIMIT = 1
@@ -40,51 +44,69 @@ SESSION_EDIT_WORD_ID = "edit_word_id"
 SESSION_EDIT_FIELD = "edit_field"
 
 
+async def get_user_from_db(session: AsyncSession, user_id: int) -> Optional[User]:
+    """Helper to get user from database"""
+    stmt = select(User).where(User.id == user_id)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     user = update.effective_user
+    if not user:
+        return
     
-    async with get_db_session() as session:
-        # Get or create user
-        stmt = select(User).where(User.id == user.id)
-        result = await session.execute(stmt)
-        db_user = result.scalar_one_or_none()
-        
-        if not db_user:
-            db_user = User(
-                id=user.id,
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name
-            )
-            session.add(db_user)
-            await session.commit()
+    logger.info(f"User {user.id} started the bot")
+    
+    try:
+        async with get_session() as session:
+            # Get or create user
+            db_user = await get_user_from_db(session, user.id)
             
-            welcome_message = (
-                f"👋 Welcome {user.first_name}!\n\n"
-                "🎯 I'm your English Learning Bot using the Leitner study method!\n\n"
-                "📝 First, let's set your daily word limit.\n"
-                "How many words would you like to practice each day?"
-            )
-            await update.message.reply_text(welcome_message)
-            return WAITING_WORD_LIMIT
-        else:
-            # Update user info
-            db_user.username = user.username
-            db_user.first_name = user.first_name
-            db_user.last_name = user.last_name
-            db_user.last_active = datetime.utcnow()
-            await session.commit()
-    
-    welcome_back = (
-        f"👋 Welcome back, {user.first_name}!\n\n"
-        "Choose an option from the menu below:"
-    )
-    await update.message.reply_text(
-        welcome_back,
-        reply_markup=get_main_menu_keyboard()
-    )
-    return ConversationHandler.END
+            if not db_user:
+                db_user = User(
+                    id=user.id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name
+                )
+                session.add(db_user)
+                await session.commit()
+                logger.info(f"Created new user {user.id}")
+                
+                welcome_message = (
+                    f"👋 Welcome {user.first_name}!\n\n"
+                    "🎯 I'm your English Learning Bot using the Leitner study method!\n\n"
+                    "📝 First, let's set your daily word limit.\n"
+                    "How many words would you like to practice each day?"
+                )
+                await update.message.reply_text(welcome_message)
+                return WAITING_WORD_LIMIT
+            else:
+                # Update user info
+                if (db_user.username != user.username or 
+                    db_user.first_name != user.first_name or 
+                    db_user.last_name != user.last_name):
+                    db_user.username = user.username
+                    db_user.first_name = user.first_name
+                    db_user.last_name = user.last_name
+                    await session.commit()
+                    logger.info(f"Updated user info for {user.id}")
+        
+        welcome_back = (
+            f"👋 Welcome back, {user.first_name}!\n\n"
+            "Choose an option from the menu below:"
+        )
+        await update.message.reply_text(
+            welcome_back,
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error in start_command: {e}")
+        await update.message.reply_text("❌ An error occurred. Please try again later.")
+        return ConversationHandler.END
 
 
 async def set_word_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -98,14 +120,13 @@ async def set_word_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return WAITING_WORD_LIMIT
         
         user_id = update.effective_user.id
-        async with get_db_session() as session:
-            stmt = select(User).where(User.id == user_id)
-            result = await session.execute(stmt)
-            db_user = result.scalar_one_or_none()
+        async with get_session() as session:
+            db_user = await get_user_from_db(session, user_id)
             
             if db_user:
                 db_user.daily_word_limit = limit
                 await session.commit()
+                logger.info(f"User {user_id} set daily limit to {limit}")
         
         await update.message.reply_text(
             f"✅ Great! You'll practice {limit} words per day.\n\n"
@@ -119,64 +140,74 @@ async def set_word_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Please enter a valid number."
         )
         return WAITING_WORD_LIMIT
+    except Exception as e:
+        logger.error(f"Error in set_word_limit: {e}")
+        await update.message.reply_text("❌ An error occurred.")
+        return ConversationHandler.END
 
 
 async def start_learning(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start a learning session"""
     user_id = update.effective_user.id
+    logger.info(f"User {user_id} starting learning session")
     
-    async with get_db_session() as session:
-        # Get user settings
-        stmt = select(User).where(User.id == user_id)
-        result = await session.execute(stmt)
-        db_user = result.scalar_one_or_none()
+    try:
+        async with get_session() as session:
+            # Get user settings
+            db_user = await get_user_from_db(session, user_id)
+            
+            if not db_user:
+                await update.message.reply_text("❌ User not found. Please use /start first.")
+                return
+            
+            limit = db_user.daily_word_limit
+            
+            # Get words for review
+            words_to_review = await get_words_for_review(session, user_id, limit)
+            
+            # Calculate how many new words to show
+            remaining_slots = limit - len(words_to_review)
+            new_words = []
+            if remaining_slots > 0:
+                new_words = await get_new_words(session, user_id, remaining_slots)
+            
+            if not words_to_review and not new_words:
+                await update.message.reply_text(
+                    "🎉 Great job! You have no words to review today.\n"
+                    "Add more words or come back tomorrow!",
+                    reply_markup=get_main_menu_keyboard()
+                )
+                return
+            
+            # Create study session
+            study_session = StudySession(user_id=user_id)
+            session.add(study_session)
+            await session.commit()
+            await session.refresh(study_session)
+            
+            # Store session data
+            context.user_data[SESSION_STUDY_SESSION] = study_session.id
+            context.user_data[SESSION_WORDS_TO_REVIEW] = [w.word_id for w in words_to_review]
+            context.user_data[SESSION_NEW_WORDS] = [w.id for w in new_words]
+            context.user_data[SESSION_WORD_INDEX] = 0
+            
+            logger.info(f"Session created for user {user_id}: {study_session.id}")
         
-        if not db_user:
-            await update.message.reply_text("❌ User not found. Please use /start first.")
-            return
+        total_words = len(words_to_review) + len(new_words)
+        await update.message.reply_text(
+            f"📚 Starting learning session!\n"
+            f"📊 Review: {len(words_to_review)} words\n"
+            f"✨ New: {len(new_words)} words\n"
+            f"📈 Total: {total_words} words\n\n"
+            "Let's begin! 🚀"
+        )
         
-        limit = db_user.daily_word_limit
+        # Show first word
+        await show_next_word(update, context)
         
-        # Get words for review
-        words_to_review = await get_words_for_review(session, user_id, limit)
-        
-        # Calculate how many new words to show
-        remaining_slots = limit - len(words_to_review)
-        new_words = []
-        if remaining_slots > 0:
-            new_words = await get_new_words(session, user_id, remaining_slots)
-        
-        if not words_to_review and not new_words:
-            await update.message.reply_text(
-                "🎉 Great job! You have no words to review today.\n"
-                "Add more words or come back tomorrow!",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-        
-        # Create study session
-        study_session = StudySession(user_id=user_id)
-        session.add(study_session)
-        await session.commit()
-        await session.refresh(study_session)
-        
-        # Store session data
-        context.user_data[SESSION_STUDY_SESSION] = study_session.id
-        context.user_data[SESSION_WORDS_TO_REVIEW] = [w.word_id for w in words_to_review]
-        context.user_data[SESSION_NEW_WORDS] = [w.id for w in new_words]
-        context.user_data[SESSION_WORD_INDEX] = 0
-    
-    total_words = len(words_to_review) + len(new_words)
-    await update.message.reply_text(
-        f"📚 Starting learning session!\n"
-        f"📊 Review: {len(words_to_review)} words\n"
-        f"✨ New: {len(new_words)} words\n"
-        f"📈 Total: {total_words} words\n\n"
-        "Let's begin! 🚀"
-    )
-    
-    # Show first word
-    await show_next_word(update, context)
+    except Exception as e:
+        logger.error(f"Error starting learning session: {e}")
+        await update.message.reply_text("❌ An error occurred starting the session.")
 
 
 async def show_next_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,50 +224,55 @@ async def show_next_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await end_learning_session(update, context)
         return
     
-    async with get_db_session() as session:
-        # Determine if showing review or new word
-        if word_index < len(words_to_review):
-            word_id = words_to_review[word_index]
-            is_new = False
-        else:
-            word_id = new_words[word_index - len(words_to_review)]
-            is_new = True
-        
-        # Get word details
-        stmt = select(Word).where(Word.id == word_id)
-        result = await session.execute(stmt)
-        word = result.scalar_one_or_none()
-        
-        if not word:
-            context.user_data[SESSION_WORD_INDEX] = word_index + 1
-            await show_next_word(update, context)
-            return
-        
-        context.user_data[SESSION_CURRENT_WORD] = word_id
-        
-        # Format word display
-        word_type = "✨ New Word" if is_new else "🔄 Review"
-        progress_text = f"Progress: {word_index + 1}/{total_words}"
-        
-        message = (
-            f"{word_type} | {progress_text}\n\n"
-            f"📝 Word: **{word.word}**\n\n"
-            "Do you know the meaning?"
-        )
-        
-        # Use callback query if available (for inline buttons)
-        if update.callback_query:
-            await update.callback_query.message.edit_text(
-                message,
-                reply_markup=get_answer_keyboard(),
-                parse_mode="Markdown"
+    try:
+        async with get_session() as session:
+            # Determine if showing review or new word
+            if word_index < len(words_to_review):
+                word_id = words_to_review[word_index]
+                is_new = False
+            else:
+                word_id = new_words[word_index - len(words_to_review)]
+                is_new = True
+            
+            # Get word details
+            stmt = select(Word).where(Word.id == word_id)
+            result = await session.execute(stmt)
+            word = result.scalar_one_or_none()
+            
+            if not word:
+                logger.warning(f"Word {word_id} not found, skipping")
+                context.user_data[SESSION_WORD_INDEX] = word_index + 1
+                await show_next_word(update, context)
+                return
+            
+            context.user_data[SESSION_CURRENT_WORD] = word_id
+            
+            # Format word display
+            word_type = "✨ New Word" if is_new else "🔄 Review"
+            progress_text = f"Progress: {word_index + 1}/{total_words}"
+            
+            message = (
+                f"{word_type} | {progress_text}\n\n"
+                f"📝 Word: **{word.word}**\n\n"
+                "Do you know the meaning?"
             )
-        else:
-            await update.message.reply_text(
-                message,
-                reply_markup=get_answer_keyboard(),
-                parse_mode="Markdown"
-            )
+            
+            # Use callback query if available (for inline buttons)
+            if update.callback_query:
+                await update.callback_query.message.edit_text(
+                    message,
+                    reply_markup=get_answer_keyboard(),
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    message,
+                    reply_markup=get_answer_keyboard(),
+                    parse_mode="Markdown"
+                )
+    except Exception as e:
+        logger.error(f"Error showing next word: {e}")
+        await update.message.reply_text("❌ An error occurred showing the word.")
 
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -244,7 +280,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    user_id = update.effective_user.id
+    # user_id = update.effective_user.id
     word_id = context.user_data.get(SESSION_CURRENT_WORD)
     is_correct = query.data == "answer_correct"
     
@@ -252,40 +288,45 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ Error: No current word found.")
         return
     
-    async with get_db_session() as session:
-        # Get word details
-        stmt = select(Word).where(Word.id == word_id)
-        result = await session.execute(stmt)
-        word = result.scalar_one_or_none()
+    try:
+        async with get_session() as session:
+            # Get word details
+            stmt = select(Word).where(Word.id == word_id)
+            result = await session.execute(stmt)
+            word = result.scalar_one_or_none()
+            
+            if not word:
+                await query.message.reply_text("❌ Word not found.")
+                return
+            
+            # Show the answer
+            answer_emoji = "✅" if is_correct else "❌"
+            message = (
+                f"{answer_emoji} {'Correct!' if is_correct else 'Keep trying!'}\n\n"
+                f"📝 **{word.word}**\n\n"
+                f"📖 Definition:\n{word.definition}\n\n"
+            )
+            
+            if word.example:
+                message += f"💬 Example:\n_{word.example}_\n\n"
+            
+            if word.translation:
+                message += f"🌐 Translation:\n{word.translation}\n\n"
+            
+            message += "How difficult is this word for you?"
+            
+            await query.message.edit_text(
+                message,
+                reply_markup=get_difficulty_keyboard(word_id, is_correct),
+                parse_mode="Markdown"
+            )
         
-        if not word:
-            await query.message.reply_text("❌ Word not found.")
-            return
+        # Store the answer (keeping for backward compatibility)
+        context.user_data["last_answer_correct"] = is_correct
         
-        # Show the answer
-        answer_emoji = "✅" if is_correct else "❌"
-        message = (
-            f"{answer_emoji} {'Correct!' if is_correct else 'Keep trying!'}\n\n"
-            f"📝 **{word.word}**\n\n"
-            f"📖 Definition:\n{word.definition}\n\n"
-        )
-        
-        if word.example:
-            message += f"💬 Example:\n_{word.example}_\n\n"
-        
-        if word.translation:
-            message += f"🌐 Translation:\n{word.translation}\n\n"
-        
-        message += "How difficult is this word for you?"
-        
-        await query.message.edit_text(
-            message,
-            reply_markup=get_difficulty_keyboard(word_id, is_correct),
-            parse_mode="Markdown"
-        )
-    
-    # Store the answer (keeping for backward compatibility)
-    context.user_data["last_answer_correct"] = is_correct
+    except Exception as e:
+        logger.error(f"Error handling answer: {e}")
+        await query.message.reply_text("❌ An error occurred.")
 
 
 async def handle_difficulty(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -300,16 +341,15 @@ async def handle_difficulty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = query.data.split("_")
         if len(parts) >= 4:
             # New format with word_id and is_correct in callback data
-            difficulty_level = parts[1]  # easy, normal, or hard
+            difficulty_value = parts[1]  # easy, normal, or hard
             word_id = int(parts[2])
             is_correct = parts[3] == "1"
         else:
-            # Fallback to old format (for backward compatibility)
-            difficulty_level = parts[1] if len(parts) > 1 else "normal"
+            # Fallback to old format
+            difficulty_value = parts[1] if len(parts) > 1 else "normal"
             word_id = context.user_data.get(SESSION_CURRENT_WORD)
             is_correct = context.user_data.get("last_answer_correct", False)
             
-            # Validate that word_id exists
             if not word_id:
                 await query.message.edit_text(
                     "❌ Error: Session data lost. Please start a new learning session.",
@@ -317,47 +357,56 @@ async def handle_difficulty(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
         
-        difficulty = difficulty_level
+        # Map string to Enum if needed, or just pass string as Enum inherits str
+        difficulty = difficulty_value
+        
     except (ValueError, IndexError) as e:
+        logger.error(f"Error parsing difficulty callback: {e}")
         await query.message.edit_text(
             "❌ Error: Invalid data. Please start a new learning session.",
             reply_markup=get_main_menu_keyboard()
         )
         return
     
-    async with get_db_session() as session:
-        # Update word progress
-        await update_word_progress(session, user_id, word_id, is_correct, difficulty)
-        
-        # Update study session stats
-        session_id = context.user_data.get(SESSION_STUDY_SESSION)
-        if session_id:
-            stmt = select(StudySession).where(StudySession.id == session_id)
-            result = await session.execute(stmt)
-            study_session = result.scalar_one_or_none()
+    try:
+        async with get_session() as session:
+            # Update word progress
+            await update_word_progress(session, user_id, word_id, is_correct, difficulty)
             
-            if study_session:
-                study_session.words_reviewed += 1
-                if is_correct:
-                    study_session.words_correct += 1
-                else:
-                    study_session.words_incorrect += 1
+            # Update study session stats
+            session_id = context.user_data.get(SESSION_STUDY_SESSION)
+            if session_id:
+                stmt = select(StudySession).where(StudySession.id == session_id)
+                result = await session.execute(stmt)
+                study_session = result.scalar_one_or_none()
                 
-                # Check if it's a new word
-                word_index = context.user_data.get(SESSION_WORD_INDEX, 0)
-                words_to_review = context.user_data.get(SESSION_WORDS_TO_REVIEW, [])
-                if word_index >= len(words_to_review):
-                    study_session.new_words += 1
-                
-                await session.commit()
+                if study_session:
+                    study_session.words_reviewed += 1
+                    if is_correct:
+                        study_session.words_correct += 1
+                    else:
+                        study_session.words_incorrect += 1
+                    
+                    # Check if it's a new word
+                    # This check is approximate as we don't track specifically if it was new in the session object
+                    # but context data helps
+                    word_index = context.user_data.get(SESSION_WORD_INDEX, 0)
+                    words_to_review = context.user_data.get(SESSION_WORDS_TO_REVIEW, [])
+                    if word_index >= len(words_to_review):
+                        study_session.new_words += 1
+                    
+                    await session.commit()
     
-    # Move to next word
-    context.user_data[SESSION_WORD_INDEX] = context.user_data.get(SESSION_WORD_INDEX, 0) + 1
-    
-    await query.message.edit_text(
-        "Great! Moving to next word... ➡️",
-        reply_markup=get_continue_keyboard()
-    )
+        # Move to next word
+        context.user_data[SESSION_WORD_INDEX] = context.user_data.get(SESSION_WORD_INDEX, 0) + 1
+        
+        await query.message.edit_text(
+            "Great! Moving to next word... ➡️",
+            reply_markup=get_continue_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Error handling difficulty: {e}")
+        await query.message.edit_text("❌ An error occurred processing your response.")
 
 
 async def handle_next_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -373,37 +422,40 @@ async def handle_next_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def end_learning_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """End the current learning session"""
-    user_id = update.effective_user.id
     session_id = context.user_data.get(SESSION_STUDY_SESSION)
     
-    async with get_db_session() as session:
+    try:
         if session_id:
-            stmt = select(StudySession).where(StudySession.id == session_id)
-            result = await session.execute(stmt)
-            study_session = result.scalar_one_or_none()
-            
-            if study_session:
-                study_session.ended_at = datetime.utcnow()
-                await session.commit()
+            async with get_session() as session:
+                stmt = select(StudySession).where(StudySession.id == session_id)
+                result = await session.execute(stmt)
+                study_session = result.scalar_one_or_none()
                 
-                # Show session summary
-                accuracy = 0
-                if study_session.words_reviewed > 0:
-                    accuracy = (study_session.words_correct / study_session.words_reviewed) * 100
-                
-                summary = (
-                    f"🎊 Session Complete!\n\n"
-                    f"📊 Words Reviewed: {study_session.words_reviewed}\n"
-                    f"✅ Correct: {study_session.words_correct}\n"
-                    f"❌ Incorrect: {study_session.words_incorrect}\n"
-                    f"✨ New Words: {study_session.new_words}\n"
-                    f"🎯 Accuracy: {accuracy:.1f}%\n\n"
-                    f"Great job! Keep it up! 💪"
-                )
-            else:
-                summary = "Session ended."
+                if study_session:
+                    study_session.ended_at = datetime.utcnow()
+                    await session.commit()
+                    
+                    # Show session summary
+                    accuracy = 0
+                    if study_session.words_reviewed > 0:
+                        accuracy = (study_session.words_correct / study_session.words_reviewed) * 100
+                    
+                    summary = (
+                        f"🎊 Session Complete!\n\n"
+                        f"📊 Words Reviewed: {study_session.words_reviewed}\n"
+                        f"✅ Correct: {study_session.words_correct}\n"
+                        f"❌ Incorrect: {study_session.words_incorrect}\n"
+                        f"✨ New Words: {study_session.new_words}\n"
+                        f"🎯 Accuracy: {accuracy:.1f}%\n\n"
+                        f"Great job! Keep it up! 💪"
+                    )
+                else:
+                    summary = "Session ended."
         else:
             summary = "Session ended."
+    except Exception as e:
+        logger.error(f"Error ending session: {e}")
+        summary = "Session ended (with error saving stats)."
     
     # Clear session data
     context.user_data.clear()
@@ -425,28 +477,32 @@ async def show_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's progress statistics"""
     user_id = update.effective_user.id
     
-    async with get_db_session() as session:
-        stats = await get_user_statistics(session, user_id)
-        
-        # Format box distribution
-        box_dist = "\n".join([
-            f"Box {box}: {count} words" for box, count in stats["box_distribution"].items() if count > 0
-        ])
-        
-        message = (
-            f"📊 Your Learning Progress\n\n"
-            f"📚 Total Words: {stats['total_words']}\n"
-            f"🏆 Mastered: {stats['mastered_words']}\n"
-            f"📅 Due Today: {stats['due_today']}\n\n"
-            f"📈 Statistics:\n"
-            f"Total Reviews: {stats['total_reviews']}\n"
-            f"Correct: {stats['total_correct']}\n"
-            f"Incorrect: {stats['total_incorrect']}\n"
-            f"Accuracy: {stats['accuracy']}%\n\n"
-            f"📦 Leitner Boxes:\n{box_dist if box_dist else 'No words yet'}"
-        )
-        
-        await update.message.reply_text(message, reply_markup=get_main_menu_keyboard())
+    try:
+        async with get_session() as session:
+            stats = await get_user_statistics(session, user_id)
+            
+            # Format box distribution
+            box_dist = "\n".join([
+                f"Box {box}: {count} words" for box, count in stats["box_distribution"].items() if count > 0
+            ])
+            
+            message = (
+                f"📊 Your Learning Progress\n\n"
+                f"📚 Total Words: {stats['total_words']}\n"
+                f"🏆 Mastered: {stats['mastered_words']}\n"
+                f"📅 Due Today: {stats['due_today']}\n\n"
+                f"📈 Statistics:\n"
+                f"Total Reviews: {stats['total_reviews']}\n"
+                f"Correct: {stats['total_correct']}\n"
+                f"Incorrect: {stats['total_incorrect']}\n"
+                f"Accuracy: {stats['accuracy']}%\n\n"
+                f"📦 Leitner Boxes:\n{box_dist if box_dist else 'No words yet'}"
+            )
+            
+            await update.message.reply_text(message, reply_markup=get_main_menu_keyboard())
+    except Exception as e:
+        logger.error(f"Error showing progress: {e}")
+        await update.message.reply_text("❌ An error occurred retrieving statistics.")
 
 
 async def add_words_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -491,7 +547,7 @@ async def handle_excel_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return WAITING_EXCEL_FILE
         
         # Process file
-        async with get_db_session() as session:
+        async with get_session() as session:
             added_count, duplicates = await process_excel_file(session, file_path, user_id)
         
         # Build response message
@@ -504,8 +560,10 @@ async def handle_excel_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response += f"⚠️ Duplicates skipped ({len(duplicates)}):\n{dup_list}"
         
         await update.message.reply_text(response, reply_markup=get_main_menu_keyboard())
+        logger.info(f"User {user_id} added {added_count} words from Excel")
         
     except Exception as e:
+        logger.error(f"Error processing Excel file: {e}")
         await update.message.reply_text(f"❌ Error processing file: {str(e)}")
     finally:
         # Clean up temp file
@@ -528,6 +586,7 @@ async def send_sample_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption="📖 Sample Excel Template\n\nUse this template to add your words!"
         )
     except Exception as e:
+        logger.error(f"Error creating sample excel: {e}")
         await update.message.reply_text(f"❌ Error creating sample: {str(e)}")
     finally:
         if file_path.exists():
@@ -546,37 +605,41 @@ async def edit_word_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def select_word_to_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle word selection for editing"""
     word_text = update.message.text.strip()
-    user_id = update.effective_user.id
     
-    async with get_db_session() as session:
-        stmt = select(Word).where(Word.word.ilike(word_text))
-        result = await session.execute(stmt)
-        word = result.scalar_one_or_none()
-        
-        if not word:
-            await update.message.reply_text(
-                f"❌ Word '{word_text}' not found.\n"
-                "Please try again or /cancel"
+    try:
+        async with get_session() as session:
+            stmt = select(Word).where(Word.word.ilike(word_text))
+            result = await session.execute(stmt)
+            word = result.scalar_one_or_none()
+            
+            if not word:
+                await update.message.reply_text(
+                    f"❌ Word '{word_text}' not found.\n"
+                    "Please try again or /cancel"
+                )
+                return WAITING_WORD_TO_EDIT
+            
+            context.user_data[SESSION_EDIT_WORD_ID] = word.id
+            
+            message = (
+                f"📝 Editing: **{word.word}**\n\n"
+                f"Definition: {word.definition}\n"
+                f"Example: {word.example or 'N/A'}\n"
+                f"Translation: {word.translation or 'N/A'}\n\n"
+                "What do you want to edit?"
             )
-            return WAITING_WORD_TO_EDIT
+            
+            await update.message.reply_text(
+                message,
+                reply_markup=get_edit_field_keyboard(),
+                parse_mode="Markdown"
+            )
         
-        context.user_data[SESSION_EDIT_WORD_ID] = word.id
-        
-        message = (
-            f"📝 Editing: **{word.word}**\n\n"
-            f"Definition: {word.definition}\n"
-            f"Example: {word.example or 'N/A'}\n"
-            f"Translation: {word.translation or 'N/A'}\n\n"
-            "What do you want to edit?"
-        )
-        
-        await update.message.reply_text(
-            message,
-            reply_markup=get_edit_field_keyboard(),
-            parse_mode="Markdown"
-        )
-    
-    return ConversationHandler.END
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error details in select_word_to_edit: {e}")
+        await update.message.reply_text("❌ An error occurred.")
+        return ConversationHandler.END
 
 
 async def handle_edit_field_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -615,40 +678,45 @@ async def handle_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error: Edit session expired.")
         return
     
-    async with get_db_session() as session:
-        stmt = select(Word).where(Word.id == word_id)
-        result = await session.execute(stmt)
-        word = result.scalar_one_or_none()
-        
-        if not word:
-            await update.message.reply_text("❌ Word not found.")
-            return
-        
-        # Get old value
-        old_value = getattr(word, field)
-        
-        # Update word
-        setattr(word, field, new_value)
-        word.updated_at = datetime.utcnow()
-        
-        # Record edit history
-        edit_history = WordEditHistory(
-            word_id=word_id,
-            edited_by=user_id,
-            field_name=field,
-            old_value=old_value,
-            new_value=new_value
-        )
-        session.add(edit_history)
-        
-        await session.commit()
-        
-        await update.message.reply_text(
-            f"✅ Updated **{word.word}**\n\n"
-            f"{field}: {new_value}",
-            reply_markup=get_main_menu_keyboard(),
-            parse_mode="Markdown"
-        )
+    try:
+        async with get_session() as session:
+            stmt = select(Word).where(Word.id == word_id)
+            result = await session.execute(stmt)
+            word = result.scalar_one_or_none()
+            
+            if not word:
+                await update.message.reply_text("❌ Word not found.")
+                return
+            
+            # Get old value
+            old_value = getattr(word, field)
+            
+            # Update word
+            setattr(word, field, new_value)
+            word.updated_at = datetime.utcnow()
+            
+            # Record edit history
+            edit_history = WordEditHistory(
+                word_id=word_id,
+                edited_by=user_id,
+                field_name=field,
+                old_value=old_value,
+                new_value=new_value
+            )
+            session.add(edit_history)
+            
+            await session.commit()
+            
+            await update.message.reply_text(
+                f"✅ Updated **{word.word}**\n\n"
+                f"{field}: {new_value}",
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode="Markdown"
+            )
+            logger.info(f"User {user_id} updated word {word.id} field {field}")
+    except Exception as e:
+        logger.error(f"Error updating word: {e}")
+        await update.message.reply_text("❌ An error occurred updating the word.")
     
     # Clear edit session
     context.user_data.pop(SESSION_EDIT_WORD_ID, None)
@@ -659,26 +727,29 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show settings menu"""
     user_id = update.effective_user.id
     
-    async with get_db_session() as session:
-        stmt = select(User).where(User.id == user_id)
-        result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
-        
-        if not user:
-            await update.message.reply_text("❌ User not found.")
-            return
-        
-        message = (
-            f"⚙️ Settings\n\n"
-            f"📈 Daily Word Limit: {user.daily_word_limit}\n"
-            f"🔔 Reminder: {'Enabled' if user.reminder_enabled else 'Disabled'}\n"
-            f"⏰ Reminder Time: {user.reminder_time}\n"
-        )
-        
-        await update.message.reply_text(
-            message,
-            reply_markup=get_settings_keyboard(user.reminder_enabled)
-        )
+    try:
+        async with get_session() as session:
+            # We can use the helper now
+            user = await get_user_from_db(session, user_id)
+            
+            if not user:
+                await update.message.reply_text("❌ User not found.")
+                return
+            
+            message = (
+                f"⚙️ Settings\n\n"
+                f"📈 Daily Word Limit: {user.daily_word_limit}\n"
+                f"🔔 Reminder: {'Enabled' if user.reminder_enabled else 'Disabled'}\n"
+                f"⏰ Reminder Time: {user.reminder_time}\n"
+            )
+            
+            await update.message.reply_text(
+                message,
+                reply_markup=get_settings_keyboard(user.reminder_enabled)
+            )
+    except Exception as e:
+        logger.error(f"Error showing settings: {e}")
+        await update.message.reply_text("❌ An error occurred.")
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

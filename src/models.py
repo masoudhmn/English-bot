@@ -1,9 +1,9 @@
 """Database models for the English Learning Bot"""
 
 from datetime import datetime, date
-from typing import Optional
+from typing import Optional, List
+from enum import Enum as PyEnum
 from sqlalchemy import (
-    create_engine,
     String,
     Integer,
     BigInteger,
@@ -22,6 +22,11 @@ from sqlalchemy.orm import (
     relationship,
 )
 
+class DifficultyLevel(str, PyEnum):
+    """Difficulty levels for word review"""
+    EASY = "easy"
+    NORMAL = "normal"
+    HARD = "hard"
 
 class Base(DeclarativeBase):
     """Base class for all models"""
@@ -48,16 +53,16 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     
     # Relationships
-    word_progress: Mapped[list["UserWordProgress"]] = relationship(
+    word_progress: Mapped[List["UserWordProgress"]] = relationship(
         "UserWordProgress", back_populates="user", cascade="all, delete-orphan"
     )
-    study_sessions: Mapped[list["StudySession"]] = relationship(
+    study_sessions: Mapped[List["StudySession"]] = relationship(
         "StudySession", back_populates="user", cascade="all, delete-orphan"
     )
-    added_words: Mapped[list["Word"]] = relationship(
+    added_words: Mapped[List["Word"]] = relationship(
         "Word", back_populates="added_by_user", foreign_keys="Word.added_by"
     )
-    word_edits: Mapped[list["WordEditHistory"]] = relationship(
+    word_edits: Mapped[List["WordEditHistory"]] = relationship(
         "WordEditHistory", back_populates="edited_by_user", cascade="all, delete-orphan"
     )
 
@@ -83,10 +88,10 @@ class Word(Base):
     
     # Relationships
     added_by_user: Mapped["User"] = relationship("User", back_populates="added_words", foreign_keys=[added_by])
-    user_progress: Mapped[list["UserWordProgress"]] = relationship(
+    user_progress: Mapped[List["UserWordProgress"]] = relationship(
         "UserWordProgress", back_populates="word", cascade="all, delete-orphan"
     )
-    edit_history: Mapped[list["WordEditHistory"]] = relationship(
+    edit_history: Mapped[List["WordEditHistory"]] = relationship(
         "WordEditHistory", back_populates="word", cascade="all, delete-orphan"
     )
     

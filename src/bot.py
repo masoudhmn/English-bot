@@ -36,35 +36,24 @@ from src.handlers import (
     WAITING_WORD_TO_EDIT,
     SESSION_EDIT_FIELD,
 )
+from src.logger import setup_logger
 
 # Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 
-async def post_init(application: Application):
-    """Initialize database and scheduler after bot starts"""
-    logger.info("Initializing database...")
-    await init_db()
-    logger.info("Database initialized!")
+async def handle_text_message_wrapper(update: Update, context):
+    """Wrapper for text message handler to keep imports clean"""
+    # Simply delegate to the handler in handlers.py
+    # We need to implement handle_text_message in handlers.py or keep it here.
+    # The original bot.py had it here. Let's see if handlers.py has it. 
+    # I didn't verify if I kept handle_text_message in handlers.py.
+    # Looking at my previous write_to_file for handlers.py, I did NOT include handle_text_message.
+    # So I need to add it here or in handlers.py. 
+    # It's better in handlers.py to keep bot.py clean.
+    # I will implement it here for now to avoid modifying handlers.py again immediately, 
+    # but strictly speaking it belongs to handlers.
     
-    logger.info("Setting up daily reminders...")
-    setup_daily_reminder(application)
-    logger.info("Scheduler setup complete!")
-
-
-async def post_shutdown(application: Application):
-    """Cleanup on shutdown"""
-    logger.info("Shutting down bot...")
-    await close_db()
-    logger.info("Database connections closed.")
-
-
-async def handle_text_message(update: Update, context):
-    """Handle text messages from main menu"""
     text = update.message.text
     
     if text == "📚 Start Learning":
@@ -81,7 +70,7 @@ async def handle_text_message(update: Update, context):
         await send_sample_excel(update, context)
     else:
         # Check if user is in edit mode
-        if SESSION_EDIT_FIELD in context.user_data:
+        if context.user_data and SESSION_EDIT_FIELD in context.user_data:
             await handle_edit_value(update, context)
         else:
             await update.message.reply_text(
@@ -91,10 +80,28 @@ async def handle_text_message(update: Update, context):
     return ConversationHandler.END
 
 
+async def post_init(application: Application):
+    """Initialize database and scheduler after bot starts"""
+    logger.info("Initializing database...")
+    await init_db()
+    
+    logger.info("Setting up daily reminders...")
+    setup_daily_reminder(application)
+    logger.info("Scheduler setup complete!")
+
+
+async def post_shutdown(application: Application):
+    """Cleanup on shutdown"""
+    logger.info("Shutting down bot...")
+    await close_db()
+    logger.info("Database connections closed.")
+
+
 def create_application():
     """Create and configure the bot application"""
     
     if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN is not set")
         raise ValueError("TELEGRAM_BOT_TOKEN is not set in environment variables")
     
     # Create application
@@ -150,7 +157,8 @@ def create_application():
     application.add_handler(CallbackQueryHandler(start_learning, pattern="^start_learning_now$"))
     
     # Text message handler (for menu buttons)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    # Using the local wrapper
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message_wrapper))
     
     return application
 
@@ -159,10 +167,14 @@ def run_bot():
     """Run the bot"""
     logger.info("Starting English Learning Bot...")
     
-    application = create_application()
-    
-    # Run the bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application = create_application()
+        
+        # Run the bot
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.critical(f"Fatal error starting bot: {e}")
+        raise
 
 
 if __name__ == "__main__":
