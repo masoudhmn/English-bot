@@ -34,6 +34,9 @@ WAITING_WORD_TO_EDIT = 3
 WAITING_EDIT_VALUE = 4
 WAITING_REMINDER_TIME = 5
 
+SETTINGS_MENU = 6
+WAITING_REMINDER_TIME = 7
+
 # User session data keys
 SESSION_CURRENT_WORD = "current_word"
 SESSION_STUDY_SESSION = "study_session"
@@ -747,9 +750,11 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message,
                 reply_markup=get_settings_keyboard(user.reminder_enabled)
             )
+            return SETTINGS_MENU
     except Exception as e:
         logger.error(f"Error showing settings: {e}")
         await update.message.reply_text("❌ An error occurred.")
+        return ConversationHandler.END
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -759,4 +764,119 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Operation cancelled.",
         reply_markup=get_main_menu_keyboard()
     )
+    return ConversationHandler.END
+
+# --------------------------- settings handlers --------------------------- #
+async def handle_settings_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle settings button presses"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    
+    try:
+        async with get_session() as session:
+            user = await get_user_from_db(session, user_id)
+            
+            if not user:
+                await query.message.edit_text("❌ User not found.", reply_markup=get_main_menu_keyboard())
+                return ConversationHandler.END
+            
+            # --- OPTION 1: Set Word Limit ---
+            if query.data == "settings_limit":  # "settings_limit" is the callback of button
+                await query.message.edit_text(
+                    "📈 *Set Daily Word Limit*\n\n"
+                    "Please type a number between 1 and 100:",
+                    parse_mode="Markdown"
+                )
+                # Transition to the next state
+                return WAITING_WORD_LIMIT
+            
+            # --- OPTION 2: Toggle Reminder ---
+            elif query.data == "settings_reminder":
+                # 1. Toggle the boolean
+                user.reminder_enabled = not user.reminder_enabled
+                await session.commit()
+                
+                # 2. Re-build the FULL settings message text
+                # (This keeps the menu looking consistent after the click)
+                message = (
+                    f"⚙️ Settings\n\n"
+                    f"📈 Daily Word Limit: {user.daily_word_limit}\n"
+                    f"🔔 Reminder: {'Enabled' if user.reminder_enabled else 'Disabled'}\n"
+                    f"⏰ Reminder Time: {user.reminder_time}\n"
+                )
+                # 3. Update text and button (Button will flip from Enable -> Disable)
+                await query.message.edit_text(
+                    message,
+                    reply_markup=get_settings_keyboard(user.reminder_enabled)
+                )
+                
+                # CRITICAL: Return the CURRENT state to stay in the menu
+                # If you return None here, the conversation stops listening!
+                return SETTINGS_MENU
+            
+            elif query.data == "settings_time":
+                await query.message.edit_text(
+                    "⏰ Enter new reminder time in HH:MM format (24-hour):"
+                )
+                return WAITING_REMINDER_TIME
+            
+            elif query.data == "settings_back":
+                await query.message.edit_text(
+                    "What would you like to do next?",
+                    reply_markup=get_main_menu_keyboard()
+                )
+    except Exception as e:
+        logger.error(f"Error handling settings button: {e}")
+        await query.message.edit_text("❌ An error occurred.", reply_markup=get_main_menu_keyboard())
+        
+async def set_reminder_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save the new reminder time provided by the user"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    # 1. Validate the Time Format
+    try:
+        # Tries to parse HH:MM (e.g., "9:30" or "14:00")
+        valid_time = datetime.strptime(text, "%H:%M").time()
+        # Format it nicely as 09:30 for consistency
+        formatted_time = valid_time.strftime("%H:%M")
+    except ValueError:
+        # If validation fails, ask again and keep the user in the same state
+        await update.message.reply_text(
+            "❌ Invalid format.\n"
+            "Please enter the time in 24-hour format, like **09:00** or **14:30**:",
+            parse_mode="Markdown"
+        )
+        return WAITING_REMINDER_TIME
+
+    # 2. Update Database
+    try:
+        async with get_session() as session:
+            user = await get_user_from_db(session, user_id)
+            
+            if user:
+                user.reminder_time = formatted_time
+                await session.commit()
+                
+                await update.message.reply_text(
+                    f"✅ Reminder time updated to **{formatted_time}**!",
+                    parse_mode="Markdown",
+                    reply_markup=get_main_menu_keyboard()
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ User not found.", 
+                    reply_markup=get_main_menu_keyboard()
+                )
+
+    except Exception as e:
+        logger.error(f"Error setting reminder time: {e}")
+        await update.message.reply_text(
+            "❌ An error occurred while saving.",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+    # 3. End the conversation
     return ConversationHandler.END

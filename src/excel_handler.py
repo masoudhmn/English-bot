@@ -3,6 +3,7 @@
 from typing import List, Tuple, Optional
 from pathlib import Path
 import openpyxl
+from openpyxl.styles import Font
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +29,12 @@ async def process_excel_file(
         # Load Excel file
         wb = openpyxl.load_workbook(file_path)
         ws = wb.active
+        
+        # Check if worksheet exists
+        if ws is None:
+            error_msg = "Excel file has no active worksheet"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
         # Get header row to map columns
         headers = {}
@@ -115,6 +122,10 @@ def validate_excel_structure(file_path: Path) -> Tuple[bool, Optional[str]]:
         wb = openpyxl.load_workbook(file_path)
         ws = wb.active
         
+        # Check if worksheet exists
+        if ws is None:
+            return False, "Excel file has no active worksheet"
+        
         # Check if file has at least header row
         if ws.max_row < 1:
             return False, "Excel file is empty"
@@ -146,14 +157,17 @@ def create_sample_excel(file_path: Path) -> None:
     try:
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Words"
+        if ws is None:
+            ws = wb.create_sheet("Words")
+        else:
+            ws.title = "Words"
         
         # Add headers
         headers = ["word", "definition", "example", "translation"]
         for idx, header in enumerate(headers, start=1):
             cell = ws.cell(1, idx)
             cell.value = header
-            cell.font = openpyxl.styles.Font(bold=True)
+            cell.font = Font(bold=True)
         
         # Add sample data
         sample_data = [
