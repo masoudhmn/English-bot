@@ -823,10 +823,12 @@ async def handle_settings_buttons(update: Update, context: ContextTypes.DEFAULT_
                 return WAITING_REMINDER_TIME
             
             elif query.data == "settings_back":
+                await query.message.delete()
                 await query.message.edit_text(
                     "What would you like to do next?",
                     reply_markup=get_main_menu_keyboard()
                 )
+                return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error handling settings button: {e}")
         await query.message.edit_text("❌ An error occurred.", reply_markup=get_main_menu_keyboard())
