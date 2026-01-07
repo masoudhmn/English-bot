@@ -1,5 +1,5 @@
 """
-Word management handlers for the English Learning Bot.
+Word management handlers for English Learning Bot.
 
 This module handles:
 - Adding words via Excel upload
@@ -7,26 +7,18 @@ This module handles:
 - Sample Excel template
 """
 
-from datetime import datetime
 from pathlib import Path
 
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
-from sqlalchemy import select
 
 from src.database import get_session
-from src.models import Word, WordEditHistory
-from src.keyboards import get_main_menu_keyboard, get_edit_field_keyboard, get_edit_word_cancel_keyboard
+from src.keyboards import get_main_menu_keyboard, get_edit_field_keyboard
 from src.constants import ConversationState, SessionKey, Messages
 from src.callback_data import EditFieldCallback
 from src.excel_handler import process_excel_file, validate_excel_structure, create_sample_excel
-from src.handlers.base import (
-    get_user_from_db,
-    get_session_value,
-    set_session_value,
-    clear_session_data,
-    log_handler,
-)
+from src.services import edit_word_field, get_word_by_text
+from src.handlers.base import get_session_value, set_session_value, clear_session_data, log_handler
 from src.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -153,9 +145,7 @@ async def edit_word_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Returns:
         WAITING_WORD_TO_EDIT state
     """
-    await update.message.reply_text(
-        Messages.PROMPT_EDIT_WORD,
-        reply_markup=get_edit_word_cancel_keyboard())
+    await update.message.reply_text(Messages.PROMPT_EDIT_WORD)
     return ConversationState.WAITING_WORD_TO_EDIT
 
 
@@ -177,10 +167,8 @@ async def select_word_to_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     try:
         async with get_session() as session:
-            # Search for word (case-insensitive)
-            stmt = select(Word).where(Word.word.ilike(word_text))
-            result = await session.execute(stmt)
-            word = result.scalar_one_or_none()
+            # Search for word using service
+            word = await get_word_by_text(session, word_text)
             
             if not word:
                 await update.message.reply_text(
@@ -235,7 +223,6 @@ async def handle_edit_field_selection(update: Update, context: ContextTypes.DEFA
     
     # Handle cancel
     if callback.is_cancel:
-        # print('Hi, I\'m inside cancel')
         await query.message.edit_text(
             Messages.SUCCESS_OPERATION_CANCELLED,
             reply_markup=get_main_menu_keyboard()
@@ -259,7 +246,7 @@ async def handle_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handle the new value input for word editing.
     
-    Updates the word in the database and records the edit history.
+    Updates the word in the database using service.
     """
     if not update.message or not update.message.text:
         return
@@ -276,32 +263,8 @@ async def handle_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         async with get_session() as session:
-            # Get word from database
-            stmt = select(Word).where(Word.id == word_id)
-            result = await session.execute(stmt)
-            word = result.scalar_one_or_none()
-            
-            if not word:
-                await update.message.reply_text(Messages.ERROR_WORD_NOT_FOUND)
-                return
-            
-            # Get old value for history
-            old_value = getattr(word, field, None)
-            
-            # Update word
-            setattr(word, field, new_value)
-            word.updated_at = datetime.utcnow()
-            
-            # Record edit history
-            edit_history = WordEditHistory(
-                word_id=word_id,
-                edited_by=user_id,
-                field_name=field,
-                old_value=old_value,
-                new_value=new_value
-            )
-            session.add(edit_history)
-            await session.commit()
+            # Update word using service
+            word = await edit_word_field(session, word_id, field, new_value, user_id)
             
             # Send success message
             await update.message.reply_text(
@@ -315,6 +278,8 @@ async def handle_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             logger.info(f"User {user_id} updated word {word.id} field {field}")
             
+    except ValueError as e:
+        await update.message.reply_text(str(e))
     except Exception as e:
         logger.error(f"Error updating word: {e}")
         await update.message.reply_text(Messages.ERROR_GENERIC)

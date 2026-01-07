@@ -11,10 +11,10 @@ from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from src.database import get_session
-from src.models import User
 from src.keyboards import get_main_menu_keyboard
 from src.constants import ConversationState, Messages
-from src.handlers.base import get_user_from_db, log_handler
+from src.services import get_or_create_user, update_user_settings
+from src.handlers.base import log_handler
 from src.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -32,7 +32,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         WAITING_WORD_LIMIT for new users, END for existing users
     """
     user = update.effective_user
-    print(user)
     if not user:
         return ConversationHandler.END
     
@@ -40,35 +39,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         async with get_session() as session:
-            # Get or create user
-            db_user = await get_user_from_db(session, user.id)
+            # Get or create user using service
+            db_user, is_new = await get_or_create_user(
+                session, user.id, user.username, user.first_name, user.last_name
+            )
             
-            if not db_user:
-                # Create new user
-                db_user = User(
-                    id=user.id,
-                    username=user.username,
-                    first_name=user.first_name,
-                    last_name=user.last_name
-                )
-                session.add(db_user)
-                await session.commit()
-                logger.info(f"Created new user {user.id}")
-                
+            if is_new:
                 # Welcome new user and ask for word limit
                 welcome_message = Messages.welcome_new_user(user.first_name or "there")
                 await update.message.reply_text(welcome_message)
                 return ConversationState.WAITING_WORD_LIMIT
-            else:
-                # Update existing user info if changed
-                if (db_user.username != user.username or 
-                    db_user.first_name != user.first_name or 
-                    db_user.last_name != user.last_name):
-                    db_user.username = user.username
-                    db_user.first_name = user.first_name
-                    db_user.last_name = user.last_name
-                    await session.commit()
-                    logger.info(f"Updated user info for {user.id}")
         
         # Welcome back existing user
         welcome_back = Messages.welcome_back(user.first_name or "there")
@@ -107,15 +87,11 @@ async def set_word_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return ConversationState.WAITING_WORD_LIMIT
         
-        # Save to database
+        # Save to database using service
         user_id = update.effective_user.id
         async with get_session() as session:
-            db_user = await get_user_from_db(session, user_id)
-            
-            if db_user:
-                db_user.daily_word_limit = limit
-                await session.commit()
-                logger.info(f"User {user_id} set daily limit to {limit}")
+            await update_user_settings(session, user_id, daily_word_limit=limit)
+            logger.info(f"User {user_id} set daily limit to {limit}")
         
         # Send success message
         await update.message.reply_text(

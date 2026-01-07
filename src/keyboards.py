@@ -251,12 +251,12 @@ def get_settings_keyboard(reminder_enabled: bool) -> InlineKeyboardMarkup:
                 callback_data=SettingsCallback(action="time").encode()
             )
         ],
-        [
-            InlineKeyboardButton(
-                ButtonText.BACK,
-                callback_data=SettingsCallback(action="back").encode()
-            )
-        ]
+        # [
+        #     InlineKeyboardButton(
+        #         ButtonText.BACK,
+        #         callback_data=SettingsCallback(action="back").encode()
+        #     )
+        # ]
     ]
     return InlineKeyboardMarkup(keyboard)
 

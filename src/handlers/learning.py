@@ -1,5 +1,5 @@
 """
-Learning session handlers for the English Learning Bot.
+Learning session handlers for English Learning Bot.
 
 This module handles:
 - Starting learning sessions
@@ -9,7 +9,6 @@ This module handles:
 """
 
 from datetime import datetime
-
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 from sqlalchemy import select
@@ -28,9 +27,8 @@ from src.callback_data import (
     DifficultyCallback,
     NavigationCallback,
 )
-from src.leitner import get_words_for_review, get_new_words, update_word_progress
+from src.services import create_study_session, record_review, end_session
 from src.handlers.base import (
-    get_user_from_db,
     get_session_value,
     set_session_value,
     clear_session_data,
@@ -65,51 +63,39 @@ async def start_learning(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with get_session() as session:
             # Get user settings
-            db_user = await get_user_from_db(session, user_id)
+            stmt = select(Word).where(Word.added_by == user_id)
+            result = await session.execute(stmt)
+            all_words = result.scalars().all()
             
-            if not db_user:
-                await reply_func(Messages.ERROR_USER_NOT_FOUND)
-                return
+            limit = 10  # Default limit for demo
             
-            limit = db_user.daily_word_limit
-            
-            # Get words for review (due today)
-            words_to_review = await get_words_for_review(session, user_id, limit)
-            
-            # Calculate remaining slots for new words
-            remaining_slots = limit - len(words_to_review)
-            new_words = []
-            if remaining_slots > 0:
-                new_words = await get_new_words(session, user_id, remaining_slots)
+            # Create study session using service
+            session_id, review_word_ids, new_word_ids = await create_study_session(
+                session, user_id, limit
+            )
             
             # Check if there are any words to study
-            if not words_to_review and not new_words:
+            if not review_word_ids and not new_word_ids:
                 await reply_func(
                     Messages.NO_WORDS_TO_REVIEW,
                     reply_markup=get_main_menu_keyboard()
                 )
                 return
             
-            # Create study session record
-            study_session = StudySession(user_id=user_id)
-            session.add(study_session)
-            await session.commit()
-            await session.refresh(study_session)
-            
             # Store session data in context
-            set_session_value(context, SessionKey.STUDY_SESSION_ID, study_session.id)
-            set_session_value(context, SessionKey.WORDS_TO_REVIEW, [w.word_id for w in words_to_review])
-            set_session_value(context, SessionKey.NEW_WORDS, [w.id for w in new_words])
+            set_session_value(context, SessionKey.STUDY_SESSION_ID, session_id)
+            set_session_value(context, SessionKey.WORDS_TO_REVIEW, review_word_ids)
+            set_session_value(context, SessionKey.NEW_WORDS, new_word_ids)
             set_session_value(context, SessionKey.WORD_INDEX, 0)
             
-            logger.info(f"Session created for user {user_id}: {study_session.id}")
+            logger.info(f"Session created for user {user_id}: {session_id}")
         
         # Notify user about session
-        total_words = len(words_to_review) + len(new_words)
+        total_words = len(review_word_ids) + len(new_word_ids)
         await reply_func(
             Messages.SESSION_STARTING.format(
-                review_count=len(words_to_review),
-                new_count=len(new_words),
+                review_count=len(review_word_ids),
+                new_count=len(new_word_ids),
                 total_count=total_words
             )
         )
@@ -293,30 +279,18 @@ async def handle_difficulty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         async with get_session() as session:
-            # Update word progress in Leitner system
-            await update_word_progress(session, user_id, word_id, is_correct, difficulty)
+            # Determine if this was a new word
+            word_index = get_session_value(context, SessionKey.WORD_INDEX, 0)
+            words_to_review = get_session_value(context, SessionKey.WORDS_TO_REVIEW, [])
+            is_new = word_index >= len(words_to_review)
             
-            # Update study session statistics
             session_id = get_session_value(context, SessionKey.STUDY_SESSION_ID)
-            if session_id:
-                stmt = select(StudySession).where(StudySession.id == session_id)
-                result = await session.execute(stmt)
-                study_session = result.scalar_one_or_none()
-                
-                if study_session:
-                    study_session.words_reviewed += 1
-                    if is_correct:
-                        study_session.words_correct += 1
-                    else:
-                        study_session.words_incorrect += 1
-                    
-                    # Check if this was a new word
-                    word_index = get_session_value(context, SessionKey.WORD_INDEX, 0)
-                    words_to_review = get_session_value(context, SessionKey.WORDS_TO_REVIEW, [])
-                    if word_index >= len(words_to_review):
-                        study_session.new_words += 1
-                    
-                    await session.commit()
+            
+            # Record review using service
+            await record_review(
+                session, session_id, word_id, user_id,
+                is_correct, difficulty, is_new
+            )
         
         # Advance to next word
         current_index = get_session_value(context, SessionKey.WORD_INDEX, 0)
@@ -368,28 +342,18 @@ async def end_learning_session(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         if session_id:
             async with get_session() as session:
-                stmt = select(StudySession).where(StudySession.id == session_id)
-                result = await session.execute(stmt)
-                study_session = result.scalar_one_or_none()
+                # End session using service
+                stats = await end_session(session, session_id)
                 
-                if study_session:
-                    # Update end time
-                    study_session.ended_at = datetime.utcnow()
-                    await session.commit()
-                    
-                    # Calculate accuracy
-                    accuracy = 0.0
-                    if study_session.words_reviewed > 0:
-                        accuracy = (study_session.words_correct / study_session.words_reviewed) * 100
-                    
+                if stats:
                     # Build summary message
                     summary = (
                         f"🎊 Session Complete!\n\n"
-                        f"📊 Words Reviewed: {study_session.words_reviewed}\n"
-                        f"✅ Correct: {study_session.words_correct}\n"
-                        f"❌ Incorrect: {study_session.words_incorrect}\n"
-                        f"✨ New Words: {study_session.new_words}\n"
-                        f"🎯 Accuracy: {accuracy:.1f}%\n\n"
+                        f"📊 Words Reviewed: {stats['words_reviewed']}\n"
+                        f"✅ Correct: {stats['words_correct']}\n"
+                        f"❌ Incorrect: {stats['words_incorrect']}\n"
+                        f"✨ New Words: {stats['new_words']}\n"
+                        f"🎯 Accuracy: {stats['accuracy']:.1f}%\n\n"
                         f"Great job! Keep it up! 💪"
                     )
                     

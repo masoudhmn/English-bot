@@ -1,13 +1,11 @@
 """
-Settings handlers for the English Learning Bot.
+Settings handlers for English Learning Bot.
 
 This module handles:
 - Settings menu display
 - Daily word limit configuration
 - Reminder toggle and time settings
 """
-
-from datetime import datetime
 
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
@@ -16,6 +14,7 @@ from src.database import get_session
 from src.keyboards import get_main_menu_keyboard, get_settings_keyboard
 from src.constants import ConversationState, Messages
 from src.callback_data import SettingsCallback
+from src.services import update_user_settings, toggle_reminder, set_user_reminder_time
 from src.handlers.base import get_user_from_db, log_handler
 from src.logger import setup_logger
 
@@ -25,7 +24,7 @@ logger = setup_logger(__name__)
 @log_handler("show_settings")
 async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Display the settings menu with current user preferences.
+    Display settings menu with current user preferences.
     
     Returns:
         SETTINGS_MENU state to handle button selections
@@ -90,7 +89,8 @@ async def handle_settings_buttons(update: Update, context: ContextTypes.DEFAULT_
             user = await get_user_from_db(session, user_id)
             
             if not user:
-                await query.message.edit_text(
+                # Send new message with reply keyboard (can't edit to change keyboard type)
+                await query.message.reply_text(
                     Messages.ERROR_USER_NOT_FOUND,
                     reply_markup=get_main_menu_keyboard()
                 )
@@ -107,9 +107,8 @@ async def handle_settings_buttons(update: Update, context: ContextTypes.DEFAULT_
             
             # Handle: Toggle Reminder
             elif callback.is_reminder:
-                # Toggle the reminder setting
-                user.reminder_enabled = not user.reminder_enabled
-                await session.commit()
+                # Toggle reminder using service
+                user, enabled = await toggle_reminder(session, user_id)
                 
                 # Rebuild settings message with updated values
                 message = (
@@ -119,7 +118,7 @@ async def handle_settings_buttons(update: Update, context: ContextTypes.DEFAULT_
                     f"⏰ Reminder Time: {user.reminder_time}\n"
                 )
                 
-                # Update message and keyboard
+                # Update message and keyboard (both inline, so edit works)
                 await query.message.edit_text(
                     message,
                     reply_markup=get_settings_keyboard(user.reminder_enabled)
@@ -135,7 +134,8 @@ async def handle_settings_buttons(update: Update, context: ContextTypes.DEFAULT_
             
             # Handle: Back to Main Menu
             elif callback.is_back:
-                await query.message.edit_text(
+                # Send new message (can't edit inline to reply keyboard)
+                await query.message.reply_text(
                     "What would you like to do next?",
                     reply_markup=get_main_menu_keyboard()
                 )
@@ -143,7 +143,8 @@ async def handle_settings_buttons(update: Update, context: ContextTypes.DEFAULT_
             
     except Exception as e:
         logger.error(f"Error handling settings button: {e}")
-        await query.message.edit_text(
+        # Send new message with reply keyboard on error
+        await query.message.reply_text(
             Messages.ERROR_GENERIC,
             reply_markup=get_main_menu_keyboard()
         )
@@ -155,7 +156,7 @@ async def set_reminder_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handle reminder time input from user.
     
-    Validates the time format (HH:MM) and saves to database.
+    Validates time format (HH:MM) and saves to database.
     
     Returns:
         WAITING_REMINDER_TIME if invalid, END if successful
@@ -166,37 +167,24 @@ async def set_reminder_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    # Validate time format
+    # Save to database using service (which validates time format)
     try:
-        valid_time = datetime.strptime(text, "%H:%M").time()
-        formatted_time = valid_time.strftime("%H:%M")
-    except ValueError:
+        async with get_session() as session:
+            user = await set_user_reminder_time(session, user_id, text)
+                
+            await update.message.reply_text(
+                Messages.SUCCESS_REMINDER_TIME_SET.format(time=user.reminder_time),
+                parse_mode="Markdown",
+                reply_markup=get_main_menu_keyboard()
+            )
+                
+    except ValueError as e:
+        # Time format validation failed
         await update.message.reply_text(
             Messages.ERROR_INVALID_TIME,
             parse_mode="Markdown"
         )
         return ConversationState.WAITING_REMINDER_TIME
-    
-    # Save to database
-    try:
-        async with get_session() as session:
-            user = await get_user_from_db(session, user_id)
-            
-            if user:
-                user.reminder_time = formatted_time
-                await session.commit()
-                
-                await update.message.reply_text(
-                    Messages.SUCCESS_REMINDER_TIME_SET.format(time=formatted_time),
-                    parse_mode="Markdown",
-                    reply_markup=get_main_menu_keyboard()
-                )
-            else:
-                await update.message.reply_text(
-                    Messages.ERROR_USER_NOT_FOUND,
-                    reply_markup=get_main_menu_keyboard()
-                )
-                
     except Exception as e:
         logger.error(f"Error setting reminder time: {e}")
         await update.message.reply_text(
