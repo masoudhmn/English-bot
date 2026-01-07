@@ -16,7 +16,7 @@ from sqlalchemy import select
 
 from src.database import get_session
 from src.models import Word, WordEditHistory
-from src.keyboards import get_main_menu_keyboard, get_edit_field_keyboard
+from src.keyboards import get_main_menu_keyboard, get_edit_field_keyboard, get_edit_word_cancel_keyboard
 from src.constants import ConversationState, SessionKey, Messages
 from src.callback_data import EditFieldCallback
 from src.excel_handler import process_excel_file, validate_excel_structure, create_sample_excel
@@ -153,7 +153,9 @@ async def edit_word_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Returns:
         WAITING_WORD_TO_EDIT state
     """
-    await update.message.reply_text(Messages.PROMPT_EDIT_WORD)
+    await update.message.reply_text(
+        Messages.PROMPT_EDIT_WORD,
+        reply_markup=get_edit_word_cancel_keyboard())
     return ConversationState.WAITING_WORD_TO_EDIT
 
 
@@ -233,12 +235,13 @@ async def handle_edit_field_selection(update: Update, context: ContextTypes.DEFA
     
     # Handle cancel
     if callback.is_cancel:
+        # print('Hi, I\'m inside cancel')
         await query.message.edit_text(
             Messages.SUCCESS_OPERATION_CANCELLED,
             reply_markup=get_main_menu_keyboard()
         )
         clear_session_data(context, [SessionKey.EDIT_WORD_ID.value, SessionKey.EDIT_FIELD.value])
-        return
+        return ConversationHandler.END 
     
     # Store field selection
     field = callback.field

@@ -32,6 +32,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         WAITING_WORD_LIMIT for new users, END for existing users
     """
     user = update.effective_user
+    print(user)
     if not user:
         return ConversationHandler.END
     

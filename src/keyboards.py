@@ -41,7 +41,7 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
         ],
         [
             KeyboardButton(ButtonText.SETTINGS),
-            KeyboardButton(ButtonText.SAMPLE_EXCEL)
+            # KeyboardButton(ButtonText.SAMPLE_EXCEL)
         ],
     ]
     return ReplyKeyboardMarkup(
@@ -50,6 +50,24 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
         is_persistent=True
     )
 
+def get_edit_word_cancel_keyboard() -> ReplyKeyboardMarkup:
+    """
+    Build the cancel edit word reply keyboard.
+    
+    This keyboard persists at the bottom of the chat and provides
+    quick access to all main features.
+    """
+    keyboard = [
+        [
+            # KeyboardButton(ButtonText.CANCEL),
+            KeyboardButton("/cancel"),
+        ],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        is_persistent=True
+    )
 
 # =============================================================================
 # Inline Keyboards (Message-attached keyboards)
@@ -192,12 +210,12 @@ def get_edit_field_keyboard() -> InlineKeyboardMarkup:
                 callback_data=EditFieldCallback(field="translation").encode()
             )
         ],
-        [
-            InlineKeyboardButton(
-                ButtonText.CANCEL,
-                callback_data=EditFieldCallback(field="cancel").encode()
-            )
-        ]
+        # [
+        #     InlineKeyboardButton(
+        #         ButtonText.CANCEL,
+        #         callback_data=EditFieldCallback(field="cancel").encode()
+        #     )
+        # ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
